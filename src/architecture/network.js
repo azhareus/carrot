@@ -943,19 +943,21 @@ Network.prototype = {
    *
    */
   test: function (dataset, cost = methods.cost.MSE) {
+    console.log("Within Network.test method")
     // Check if dropout is enabled, set correct mask
     var i;
     if (this.dropout) {
+      console.log("Dropout condition passed")
       for (i = 0; i < this.nodes.length; i++) {
         if (this.nodes[i].type === 'hidden' || this.nodes[i].type === 'constant') {
           this.nodes[i].mask = 1 - this.dropout;
         }
       }
     }
-
+    console.log("After dropout has run")
     var error = 0;
     var start = Date.now();
-
+    console.log("Right before dataset loop")
     for (i = 0; i < dataset.length; i++) {
       let input = dataset[i].input;
       let target = dataset[i].output;
@@ -1229,7 +1231,6 @@ Network.prototype = {
    * execute();
    */
   evolve: async function(dataset, options) {
-    console.warn("Network.evolve called")
     if(dataset[0].input.length !== this.input || dataset[0].output.length !== this.output) {
       throw new Error('Dataset input/output size should be same as network input/output size!');
     }
@@ -1263,27 +1264,9 @@ Network.prototype = {
     }
 
     var start = Date.now();
-    
-    console.log(start)
 
-    options.fitnessFunction = "cheese";
-    if (threads === 1) {
-      console.log("Single threaded activated")
-      // Create the fitness function
-      options.fitnessFunction = function (genome, dataset) {
-        var score = 0;
-        for (var i = 0; i < amount; i++) {
-          score -= genome.test(dataset, cost).error;
-        }
-
-        score -= (genome.nodes.length - genome.input - genome.output + genome.connections.length + genome.gates.length) * growth;
-        score = isNaN(score) ? -Infinity : score; // this can cause problems with fitness proportionate selection
-
-        return score / amount;
-      };
-      console.warn("Just after creating the single-threaded fitnessFunction")
-    } else {
-      console.warn("Just before serializing the dataset")
+    let fitnessFunction;
+    if (threads > 1) {
       // Serialize the dataset
       var converted = multi.serializeDataSet(dataset);
 
@@ -1299,8 +1282,8 @@ Network.prototype = {
         }
       }
       
-      console.warn("Just before creating the multi-threaded fitnessFunction")
-      options.fitnessFunction = function (population, dataset) {
+      // Create the fitnessFunction
+      fitnessFunction = function (population, amount, dataset) {
         return new Promise((resolve, reject) => {
           // Create a queue
           var queue = population.slice();
@@ -1329,21 +1312,18 @@ Network.prototype = {
           }
         });
       };
-      console.warn("Just after creating the multi-threaded fitnessFunction")
 
       options.fitnessPopulation = true;
     }
     
-    console.log(options.fitnessFunction)
-    console.log(options)
+    if(fitnessFunction) options.fitnessFunction = fitnessFunction
     
     // Intialise the NEAT instance
     options.network = this;
+    options.dataset = dataset
     
-    console.log(options)
-    console.log("Just before initializing Neat")
     var neat = new Neat(this.input, this.output, options);
-    console.log("Just after initializing Neat")
+
     var error = -Infinity;
     var bestFitness = -Infinity;
     var bestGenome;
@@ -1843,7 +1823,8 @@ var selection = methods.selection;
 * @param {number} [options.mutationRate=0.4] Sets the mutation rate. If set to 0.3, 30% of the new population will be mutated. Default is 0.3.
 * @param {number} [options.mutationAmount=1] If mutation occurs (randomNumber < mutationRate), sets amount of times a mutation method will be applied to the network.
 * @param {boolean} [options.fitnessPopulation=false] When true, requires fitness function that takes an array of genomes as input and sets their .score property
-* @param {Function} [options.fitness] - A fitness function to evaluate the networks. Takes a `genome`, i.e. a [network](Network), and a `dataset` and sets the genome's score property
+* @param {cost} [options.cost] A cost function
+* @param {Function} [options.fitnessFunction] - A fitness function to evaluate the networks. Takes a `genome`, i.e. a [network](Network), and a `dataset` and sets the genome's score property
 * @param {string} [options.selection=FITNESS_PROPORTIONATE] [Selection method](selection) for evolution (e.g. Selection.FITNESS_PROPORTIONATE).
 * @param {Array} [options.crossover] Sets allowed crossover methods for evolution.
 * @param {Network} [options.network=false] Network to start evolution from
@@ -1856,6 +1837,8 @@ var selection = methods.selection;
 * @prop {number} generation A count of the generations
 */
 function Neat (input, output, {
+  dataset,
+  growth,
   equal = true,
   clear = false,
   popsize = 50,
@@ -1863,7 +1846,17 @@ function Neat (input, output, {
   provenance = 0,
   mutationRate = 0.4,
   mutationAmount = 1,
+  cost = methods.cost.MSE,
   fitnessPopulation = false,
+  fitnessFunction = function (genome, amount, cost, growth, dataset) {
+    var score = 0;
+    for (var i = 0; i < amount; i++) score -= genome.test(dataset, cost).error;
+
+    score -= (genome.nodes.length - genome.input - genome.output + genome.connections.length + genome.gates.length) * growth;
+    score = isNaN(score) ? -Infinity : score; // this can cause problems with fitness proportionate selection
+
+    return score / amount;
+  },
   selection = methods.selection.POWER,
   crossover = [
     methods.crossover.SINGLE_POINT,
@@ -1878,7 +1871,30 @@ function Neat (input, output, {
   maxNodes = Infinity,
   maxConns = Infinity,
   maxGates = Infinity
-} = {}) {
+} = {
+  dataset,
+  growth,
+  clear,
+  popsize,
+  elitism,
+  provenance,
+  mutationRate,
+  mutationAmount,
+  cost,
+  fitnessPopulation,
+  fitnessFunction,
+  selection,
+  crossover,
+  mutation,
+  efficientMutation,
+  template,
+  mutationSelection,
+  maxNodes,
+  maxConns,
+  maxGates
+}) {
+  let self = this;
+  console.log()
   console.log("Neat just initialized, fitnessFunction = " + fitnessFunction)
   /**
   * Create the initial pool of genomes
@@ -1915,18 +1931,19 @@ function Neat (input, output, {
    * @param {<{input: number[], output: number[]}>} dataset Dataset
    */
   const evaluate = async function () {
+    console.log("within Neat.evaluate function")
     // should rework fitness (function) to dynamically detect genome vs population
     if (fitnessPopulation) {
       if (clear)
         for (let i = 0; i < population.length; i++)
           population[i].clear();
       
-      await fitnessFunction(population, dataset);
+      await fitnessFunction(population, mutationAmount, cost, growth, dataset);
     } else {
       for (let i = 0; i < population.length; i++) {
         var genome = population[i];
         if (clear) genome.clear();
-        genome.score = await fitnessFunction(genome, dataset);
+        genome.score = await fitnessFunction(genome, mutationAmount, cost, growth, dataset);
       }
     }
   }
@@ -1936,7 +1953,7 @@ function Neat (input, output, {
    *
    * @todo Consider swtiching native sort to lodash sort to avoid mozilla firefox issues [see here](https://stackoverflow.com/questions/45126469/native-array-prototype-sort-and-sortby-sorts-values-differently)
    */
-  const sort = function (population = population) {
+  const sort = function (population = getPopulation()) {
     population.sort(function (a, b) { return b.score - a.score; })
   }
   
@@ -1947,7 +1964,7 @@ function Neat (input, output, {
    *
    * @return {Network} Selected genome for offspring generation
    */
-  const getParent = function (selection = selection, population = population, sort = sort, popsize = popsize) {
+  const getParent = function (selection, population = getPopulation(), sort, popsize) {
     var i;
     switch (selection) { // note: selection & selection.POWER refer to different objects, a bit confusing, should fix
       case selection.POWER:
@@ -2089,10 +2106,13 @@ function Neat (input, output, {
    * @returns {Network} Child network
    */
   const getOffspring = function () {
-    let parent1 = getParent();
-    let parent2 = getParent();
-
-    return Network.crossOver(parent1, parent2, equal);
+    let parent1 = getParent(selection, population, sort, popsize);
+    let parent2 = getParent(selection, population, sort, popsize);
+    
+    if(parent1 && parent2)
+      return Network.crossOver(parent1, parent2, equal);
+      
+    throw new Error("Something went wrong with getParent() within GetOffspring")
   }
   
   /**
@@ -2110,13 +2130,11 @@ function Neat (input, output, {
    * @returns {Network} Fittest genome (network) in the population
    */
   const evolve = async function() {
-      
     // Check if evaluated, sort the population
     if (typeof population[population.length - 1].score === 'undefined') {
       await evaluate(population);
     }
     
-    console.warn("Neat.evolve evaluate done")
     sort();
 
     let fittest = Network.fromJSON(population[0].toJSON());
